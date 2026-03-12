@@ -259,6 +259,18 @@ export default function NAQTQuizBowl() {
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({subject,subArea,difficulty}),
       });
+
+      // Check content-type BEFORE calling .json()
+      // If the route file is missing/misplaced, Next.js returns an HTML 404 page.
+      const contentType = res.headers.get("content-type")||"";
+      if (!contentType.includes("application/json")) {
+        throw new Error(
+          res.status===404
+            ? "⚠️ API route not found (404). Make sure app/api/question/route.ts exists in your GitHub repo and Vercel has redeployed."
+            : `⚠️ Server returned ${res.status} (non-JSON). Check Vercel function logs for details.`
+        );
+      }
+
       const data=await res.json();
       if(!res.ok||data.error) throw new Error(data.error||"API error");
       setQuestion(data); setQCount(c=>c+1); setPhase("reading");
