@@ -116,6 +116,7 @@ export default function NAQTQuizBowl(){
   const [result,   setResult]   = useState<JudgeResult|null>(null);
   const [isPower,  setIsPower]  = useState(false);
   const [mode,     setMode]     = useState<"text"|"voice">("text");
+  const [isPaused, setIsPaused] = useState(false);
 
   // ── Score ──
   const [score,   setScore]   = useState(0);
@@ -346,7 +347,7 @@ export default function NAQTQuizBowl(){
   const doFetch=useCallback(async(resetHistory=false)=>{
     if(resetHistory) usedIdsRef.current=[];
     setPhase("loading"); setError(""); setQuestion(null); setResult(null);
-    setHint(""); setHintLoading(false);
+    setHint(""); setHintLoading(false); setIsPaused(false);
     setTextAns(""); setVoiceAns(""); setIsPower(false);
     setDisplayTokens([]); setLitWordIdx(-1); clearTimer();
     powerPassedRef.current=false; powerCharIdxRef.current=Infinity;
@@ -384,8 +385,20 @@ export default function NAQTQuizBowl(){
 
   // Expose as named buttons
   const fetchQuestion   = useCallback(()=>doFetch(false),[doFetch]);
-  const refreshQuestion = useCallback(()=>doFetch(false),[doFetch]);  // same question pool, just new random
-  const resetAndFetch   = useCallback(()=>doFetch(true), [doFetch]);  // clear history first
+  const refreshQuestion = useCallback(()=>doFetch(false),[doFetch]);
+  const resetAndFetch   = useCallback(()=>doFetch(true), [doFetch]);
+
+  // ── Pause / Resume TTS reading ──
+  const togglePause = useCallback(()=>{
+    if(phaseRef.current !== "reading") return;
+    if(!isPaused){
+      window.speechSynthesis.pause();
+      setIsPaused(true);
+    } else {
+      window.speechSynthesis.resume();
+      setIsPaused(false);
+    }
+  },[isPaused]);
 
   // Enter key submit
   const handleKey=(e:React.KeyboardEvent)=>{
@@ -596,7 +609,7 @@ export default function NAQTQuizBowl(){
             </div>
 
             {/* Action buttons row */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto auto",gap:10}}>
 
               {/* Generate (primary) */}
               <button className="gbtn" onClick={fetchQuestion}
@@ -618,6 +631,20 @@ export default function NAQTQuizBowl(){
                   background:phase==="answered"?C.purpleL:"#f1f3f5",
                   fontSize:"0.92rem",whiteSpace:"nowrap",padding:"10px 16px"}}>
                 ➡️ Next
+              </button>
+
+              {/* Pause / Start — only active while reading */}
+              <button className="ibtn" onClick={togglePause}
+                disabled={phase!=="reading"}
+                style={{
+                  borderColor: isPaused ? C.green  : C.gold,
+                  color:        isPaused ? C.green  : C.gold,
+                  background:   isPaused ? C.greenL : C.goldL,
+                  opacity: phase==="reading" ? 1 : 0.35,
+                  fontSize:"0.92rem", whiteSpace:"nowrap", padding:"10px 16px",
+                  transition:"all 0.2s",
+                }}>
+                {isPaused ? "▶️ Start" : "⏸ Pause"}
               </button>
 
               {/* Refresh — new random question, same settings */}
