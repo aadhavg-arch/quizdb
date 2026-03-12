@@ -59,7 +59,7 @@ Return ONLY valid JSON — absolutely no markdown, no code fences, no text befor
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-sonnet-4-5",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -73,6 +73,7 @@ Return ONLY valid JSON — absolutely no markdown, no code fences, no text befor
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     console.error(`Anthropic ${response.status}:`, body.slice(0, 300));
+    if (response.status === 400) return jsonError("❌ Bad request (400). This is usually a wrong model name — the code has been fixed, please redeploy.");
     if (response.status === 401) return jsonError("❌ ANTHROPIC_API_KEY is invalid or expired. Update it in Vercel settings.");
     if (response.status === 429) return jsonError("⏳ Rate limit reached. Wait a moment and try again.");
     if (response.status === 529) return jsonError("Anthropic servers are overloaded. Please try again in a few seconds.");
