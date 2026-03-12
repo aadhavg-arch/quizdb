@@ -1,117 +1,87 @@
-// app/api/question/route.ts
-// ⚠️  This file MUST be at: app/api/question/route.ts  (not in project root!)
-// Add ANTHROPIC_API_KEY in Vercel → Project → Settings → Environment Variables → Redeploy
+// app/api/question/route.ts  ← exact file path in your repo
+// Fetches real questions from QB Reader public API (no key needed)
 
 import { NextRequest, NextResponse } from "next/server";
 
-// Helper: always returns JSON so the client never sees an HTML error page
-function jsonError(msg: string, status = 500) {
-  return NextResponse.json({ error: msg }, {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+function jsonErr(msg: string, status = 500) {
+  return NextResponse.json({ error: msg }, { status, headers: { "Content-Type": "application/json" } });
 }
 
-export async function POST(req: NextRequest) {
-  // 1. API key check — clearest possible error message
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return jsonError(
-      "⚠️ ANTHROPIC_API_KEY is not set. Go to Vercel → your project → Settings → Environment Variables → add ANTHROPIC_API_KEY → Save → Redeploy."
-    );
-  }
+// Map our UI categories → QB Reader category names
+const CAT_MAP: Record<string, string> = {
+  "History": "History",
+  "Science": "Science",
+  "Literature": "Literature",
+  "Fine Arts": "Fine Arts",
+  "Mythology": "Mythology",
+  "Geography": "Geography",
+  "Philosophy": "Philosophy",
+  "Social Science": "Social Science",
+  "Current Events": "Current Events",
+  "Pop Culture": "Trash",
+};
 
-  // 2. Parse request body safely
-  let subject = "History", subArea = "World History", difficulty = "Middle School Standard";
+// Map UI difficulty → QB Reader difficulty number
+// 1=MS, 2=Easy HS, 3=Regular HS, 4=Hard HS, 5=Nationals
+const DIFF_MAP: Record<string, string> = {
+  "Middle School": "1",
+  "Easy": "1",
+  "Hard": "2",
+  "High School": "3",
+};
+
+export async function POST(req: NextRequest) {
+  let category = "History", difficulty = "1";
   try {
     const body = await req.json();
-    subject    = body.subject    ?? subject;
-    subArea    = body.subArea    ?? subArea;
-    difficulty = body.difficulty ?? difficulty;
-  } catch {
-    // use defaults — body parse failure is non-fatal
-  }
+    category   = CAT_MAP[body.category] ?? "History";
+    difficulty = body.difficulty ?? "1";
+  } catch { /* use defaults */ }
 
-  // 3. Build prompt
-  const prompt = `You are an expert NAQT (National Academic Quiz Tournaments) question writer for middle school.
+  const url = new URL("https://www.qbreader.org/api/random-tossup");
+  url.searchParams.set("difficulties", difficulty);
+  url.searchParams.set("categories",   category);
+  url.searchParams.set("number",       "1");
 
-Generate ONE pyramid tossup question:
-Subject: ${subject} / ${subArea}
-Difficulty: ${difficulty}
-
-RULES:
-1. Pyramid structure: hardest/obscure clues first, easiest/well-known clues last
-2. Place marker "(*)" exactly ONCE — where a well-prepared player should buzz
-3. Final sentence must start with "For 10 points,"
-4. 4-6 sentences total, 100% factually accurate
-
-Return ONLY valid JSON — absolutely no markdown, no code fences, no text before or after:
-{"tossup":"full text with (*) exactly once","answer":"primary answer","alternates":["alt1","alt2"],"clue":"one key sentence","powerClues":["fact1","fact2","fact3"]}`;
-
-  // 4. Call Anthropic
-  let response: Response;
+  let res: Response;
   try {
-    response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }],
-      }),
+    res = await fetch(url.toString(), {
+      headers: { Accept: "application/json" },
+      // 8-second timeout
+      signal: AbortSignal.timeout(8000),
     });
-  } catch (netErr) {
-    console.error("Network error reaching Anthropic:", netErr);
-    return jsonError("Network error reaching Anthropic. Check Vercel function logs.");
+  } catch (e) {
+    console.error("QB Reader fetch error:", e);
+    return jsonErr("Could not reach QB Reader. Please try again.");
   }
 
-  // 5. Handle Anthropic HTTP errors
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    console.error(`Anthropic ${response.status}:`, body.slice(0, 300));
-    if (response.status === 400) return jsonError("❌ Bad request (400). This is usually a wrong model name — the code has been fixed, please redeploy.");
-    if (response.status === 401) return jsonError("❌ ANTHROPIC_API_KEY is invalid or expired. Update it in Vercel settings.");
-    if (response.status === 429) return jsonError("⏳ Rate limit reached. Wait a moment and try again.");
-    if (response.status === 529) return jsonError("Anthropic servers are overloaded. Please try again in a few seconds.");
-    return jsonError(`Anthropic API returned ${response.status}. Please try again.`);
-  }
+  if (!res.ok) return jsonErr(`QB Reader returned ${res.status}.`);
 
-  // 6. Parse Anthropic response
-  let aiData: { content?: Array<{ type: string; text: string }> };
-  try {
-    aiData = await response.json();
-  } catch {
-    return jsonError("Could not parse Anthropic response. Please try again.");
-  }
+  const data = await res.json() as {
+    tossups?: Array<{
+      question?: string;
+      question_sanitized?: string;
+      answer?: string;
+      answer_sanitized?: string;
+      category?: string;
+      subcategory?: string;
+      difficulty?: number;
+      set?: { name?: string };
+    }>;
+  };
 
-  const raw = aiData.content?.find(b => b.type === "text")?.text ?? "";
+  const t = data.tossups?.[0];
+  if (!t) return jsonErr("No tossup found. Try a different category.");
 
-  // 7. Strip any accidental markdown fences
-  const clean = raw
-    .replace(/^```[a-z]*\s*/i, "")
-    .replace(/```\s*$/, "")
-    .trim();
+  // Clean HTML from answer (QB Reader sometimes returns <b>Answer</b>)
+  const stripHtml = (s: string) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').trim();
 
-  // 8. Parse the JSON the AI returned
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(clean);
-  } catch {
-    console.error("AI JSON parse failed. Raw:", raw.slice(0, 400));
-    return jsonError("AI returned unexpected format. Please try again.");
-  }
-
-  // 9. Validate required fields
-  if (typeof parsed.tossup !== "string" || !parsed.tossup ||
-      typeof parsed.answer  !== "string" || !parsed.answer) {
-    return jsonError("AI response was missing required fields. Please try again.");
-  }
-
-  return NextResponse.json(parsed, {
-    headers: { "Content-Type": "application/json" },
-  });
+  return NextResponse.json({
+    question:    t.question_sanitized ?? t.question ?? "",
+    answer:      stripHtml(t.answer_sanitized ?? t.answer ?? ""),
+    category:    t.category    ?? category,
+    subcategory: t.subcategory ?? "",
+    setName:     t.set?.name   ?? "",
+    difficulty:  t.difficulty  ?? 1,
+  }, { headers: { "Content-Type": "application/json" } });
 }
