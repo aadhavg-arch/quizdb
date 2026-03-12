@@ -121,6 +121,14 @@ export default function NAQTQuizBowl() {
   const [result,      setResult]      = useState<"correct" | "wrong" | null>(null);
   const [inputMode,   setInputMode]   = useState<"text" | "voice">("text");
 
+  // POWER scoring — true when student buzzes BEFORE the (*) marker is read
+  const [isPower,          setIsPower]          = useState(false);
+  const [powerCount,       setPowerCount]       = useState(0);
+  // Ref tracks in real-time whether TTS has passed the (*) position yet
+  const powerMarkPassedRef = useRef<boolean>(false);
+  // Char index in the TTS string where the (*) marker sits
+  const powerMarkIndexRef  = useRef<number>(0);
+
   // Refs
   const answerRef    = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -196,6 +204,9 @@ export default function NAQTQuizBowl() {
     setResult(null);
     setTextAnswer("");
     setVoiceAnswer("");
+    setIsPower(false);
+    powerMarkPassedRef.current = false;
+    powerMarkIndexRef.current  = 0;
     setLog([]);
     timer.reset();
     window.speechSynthesis?.cancel();
@@ -231,25 +242,62 @@ export default function NAQTQuizBowl() {
 
   // ── Read question aloud ───────────────────────────────────
   const readQuestion = (tossup: string) => {
+    // POWER: find where (*) sits in the original tossup.
+    // TTS text replaces (*) with "... " — offsets are equal up to that point.
+    const powerPos = tossup.indexOf("(*)");
+    powerMarkIndexRef.current  = powerPos >= 0 ? powerPos : Infinity;
+    powerMarkPassedRef.current = powerPos < 0; // no marker → never a power buzz
+
     const text = tossup.replace(/\(\*\)/g, "... ");
-    speak(text, () => {
-      // Finished reading without buzz — auto prompt
-      if (setPhase) {
+
+    window.speechSynthesis.cancel();
+    const doSpeak = () => {
+      const utter = new SpeechSynthesisUtterance(text);
+      const voice = getAmericanVoice();
+      if (voice) utter.voice = voice;
+      utter.lang = "en-US"; utter.rate = 0.9; utter.pitch = 1.0; utter.volume = 1.0;
+
+      // Track reading position word-by-word to detect when (*) is passed
+      utter.addEventListener("boundary", (e: SpeechSynthesisEvent) => {
+        if (!powerMarkPassedRef.current && e.charIndex >= powerMarkIndexRef.current) {
+          powerMarkPassedRef.current = true;
+        }
+      });
+
+      utter.onend = () => {
         setPhase("buzzed");
         timer.start();
         addLog("reader", "Time is up — please answer now.");
         setTimeout(() => answerRef.current?.focus(), 100);
-      }
-    });
+      };
+      window.speechSynthesis.speak(utter);
+    };
+    if (window.speechSynthesis.getVoices().length === 0) {
+      window.speechSynthesis.onvoiceschanged = doSpeak;
+    } else {
+      doSpeak();
+    }
   };
 
   // ── Buzz in ───────────────────────────────────────────────
   const buzzIn = useCallback(() => {
     window.speechSynthesis?.cancel();
+
+    // POWER: student buzzed before (*) was read → 15 pts if correct
+    const power = !powerMarkPassedRef.current;
+    setIsPower(power);
+
     setPhase("buzzed");
     timer.start();
-    addLog("reader", "Buzzer! Go ahead — you have 5 seconds.");
-    speak("Buzzer! Go ahead.");
+
+    if (power) {
+      addLog("reader", "⚡ POWER BUZZ! Answer before the marker — 15 points if correct!");
+      speak("Power buzz! Go ahead, 15 points if correct.");
+    } else {
+      addLog("reader", "Buzzer! Go ahead — you have 5 seconds.");
+      speak("Buzzer! Go ahead.");
+    }
+
     setTimeout(() => {
       if (inputMode === "voice") startVoiceAnswer();
       else answerRef.current?.focus();
@@ -315,16 +363,23 @@ export default function NAQTQuizBowl() {
     setPhase("answered");
 
     if (correct) {
-      setScore((s) => s + 10);
+      // POWER: 15 pts if buzzed before (*), 10 pts otherwise
+      const pts = isPower ? 15 : 10;
+      setScore((s) => s + pts);
       setCorrectCount((c) => c + 1);
-      addLog("judge", `✅ Correct! The answer is "${question.answer}". 10 points!`);
-      speak(`Correct! ${question.answer}. 10 points.`);
+      if (isPower) setPowerCount((p) => p + 1);
+
+      const powerMsg = isPower ? "⚡ POWER! " : "";
+      addLog("judge", `✅ ${powerMsg}Correct! The answer is "${question.answer}". ${pts} points!`);
+      speak(isPower
+        ? `Power! Correct! ${question.answer}. Fifteen points.`
+        : `Correct! ${question.answer}. 10 points.`);
     } else {
       addLog("judge", `❌ Incorrect. The correct answer is "${question.answer}".`);
       addLog("judge", `💡 Remember: ${question.clue}`);
       speak(`That is incorrect. The correct answer is ${question.answer}. ${question.clue}`);
     }
-  }, [question, textAnswer, timer, addLog, speak]);
+  }, [question, textAnswer, isPower, timer, addLog, speak]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && textAnswer.trim()) {
@@ -352,14 +407,19 @@ export default function NAQTQuizBowl() {
 
   // ── Phase badge ───────────────────────────────────────────
   const phaseBadge: Record<Phase, { label: string; bg: string; color: string }> = {
-    idle:     { label: "Ready",    bg: C.bgAlt,      color: C.textMuted },
-    loading:  { label: "Loading…", bg: C.accentLight, color: C.accent   },
+    idle:     { label: "Ready",    bg: C.bgAlt,       color: C.textMuted },
+    loading:  { label: "Loading…", bg: C.accentLight,  color: C.accent   },
     reading:  { label: "🎙 Reading — Press SPACE to buzz!", bg: C.readingLight, color: C.reading },
-    buzzed:   { label: "⏱ Answer Now!",  bg: C.goldLight,  color: C.gold  },
-    listening:{ label: "🎤 Listening…",  bg: C.buzzLight,  color: C.buzz  },
-    answered: { label: result === "correct" ? "✅ Correct!" : "❌ Incorrect", 
-                bg: result === "correct" ? C.greenLight : C.redLight,
-                color: result === "correct" ? C.green : C.red },
+    buzzed:   { label: isPower ? "⚡ POWER BUZZ — Answer for 15 pts!" : "⏱ Answer Now! — 10 pts",
+                bg: isPower ? "#fdf4ff" : C.goldLight,
+                color: isPower ? "#7c3aed" : C.gold },
+    listening:{ label: isPower ? "🎤 Listening… POWER BUZZ active!" : "🎤 Listening…",
+                bg: C.buzzLight, color: C.buzz },
+    answered: { label: result === "correct"
+                  ? (isPower ? "⚡ POWER — Correct! +15 pts" : "✅ Correct! +10 pts")
+                  : "❌ Incorrect",
+                bg: result === "correct" ? (isPower ? "#fdf4ff" : C.greenLight) : C.redLight,
+                color: result === "correct" ? (isPower ? "#7c3aed" : C.green) : C.red },
   };
   const badge = phaseBadge[phase];
 
@@ -564,21 +624,37 @@ export default function NAQTQuizBowl() {
             {/* Result */}
             {phase === "answered" && (
               <div>
-                <div style={{ background: result === "correct" ? C.greenLight : C.redLight,
-                  border: `1px solid ${result === "correct" ? C.green : C.red}40`,
+                <div style={{ background: result === "correct"
+                    ? (isPower ? "#fdf4ff" : C.greenLight) : C.redLight,
+                  border: `1px solid ${result === "correct"
+                    ? (isPower ? "#d8b4fe" : C.green + "40") : C.red + "40"}`,
                   borderRadius: 10, padding: "14px 20px", marginBottom: 14,
                   display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div>
+                    {/* POWER badge */}
+                    {result === "correct" && isPower && (
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: 5,
+                        background: "#7c3aed", color: "#fff", padding: "2px 10px",
+                        borderRadius: 20, fontSize: "0.72rem", fontWeight: "bold",
+                        letterSpacing: "0.12em", textTransform: "uppercase",
+                        marginBottom: 6 }}>
+                        ⚡ POWER — Early Buzz!
+                      </div>
+                    )}
                     <div style={{ fontSize: "1.1rem", fontWeight: "bold",
-                      color: result === "correct" ? C.green : C.red }}>
-                      {result === "correct" ? "✓ Correct! +10 points" : "✗ Incorrect — 0 points"}
+                      color: result === "correct" ? (isPower ? "#7c3aed" : C.green) : C.red }}>
+                      {result === "correct"
+                        ? (isPower ? "✓ Correct! +15 points (Power)" : "✓ Correct! +10 points")
+                        : "✗ Incorrect — 0 points"}
                     </div>
                     <div style={{ fontSize: "0.85rem", color: C.textMid, marginTop: 3 }}>
                       You answered: <em>"{voiceAnswer || textAnswer}"</em>
                       {" · "}Time: <strong style={{ color: C.gold }}>{timer.elapsed}s</strong>
                     </div>
                   </div>
-                  <div style={{ fontSize: "2.2rem" }}>{result === "correct" ? "🏆" : "📖"}</div>
+                  <div style={{ fontSize: "2.2rem" }}>
+                    {result === "correct" ? (isPower ? "⚡" : "🏆") : "📖"}
+                  </div>
                 </div>
 
                 {result === "wrong" && (
@@ -692,6 +768,7 @@ export default function NAQTQuizBowl() {
             {[
               { label: "Total Points", val: score,          color: C.gold  },
               { label: "Correct",      val: correctCount,   color: C.green },
+              { label: "⚡ Powers",    val: powerCount,     color: "#7c3aed" },
               { label: "Questions",    val: questionCount,  color: C.accent },
               { label: "Accuracy",     val: `${accuracy}%`, color: accuracy >= 70 ? C.green : accuracy >= 40 ? C.gold : C.red },
             ].map(({ label, val, color }) => (
@@ -703,7 +780,7 @@ export default function NAQTQuizBowl() {
               </div>
             ))}
             <div style={{ display: "flex", alignItems: "center", padding: "0 16px" }}>
-              <button onClick={() => { setScore(0); setQuestionCount(0); setCorrectCount(0); setLog([]); }}
+              <button onClick={() => { setScore(0); setQuestionCount(0); setCorrectCount(0); setPowerCount(0); setLog([]); }}
                 style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 8,
                   padding: "6px 14px", color: C.textMuted, fontSize: "0.78rem",
                   fontFamily: "inherit", cursor: "pointer" }}>
@@ -719,10 +796,11 @@ export default function NAQTQuizBowl() {
             textTransform: "uppercase", marginBottom: 12 }}>How to Use</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
             {[
-              ["1. Pick Subject",     "Select subject + sub-area from NAQT MS distribution"],
-              ["2. Choose Input",     "Toggle between typing or voice answers"],
-              ["3. Buzz with SPACE",  "Press SPACE (or click button) to buzz in during reading"],
-              ["4. Answer & Learn",   "Get scored + power clues to study for next time"],
+              ["1. Pick Subject",      "Select subject + sub-area from NAQT MS distribution"],
+              ["2. Choose Input",      "Toggle between typing or voice answers"],
+              ["3. ⚡ Power Buzz",     "Buzz BEFORE the ★ BUZZ HERE marker → correct = 15 pts!"],
+              ["4. Normal Buzz",       "Buzz AFTER the marker or at end → correct = 10 pts"],
+              ["5. Answer & Learn",    "Get scored + power clues to study for next time"],
             ].map(([title, desc]) => (
               <div key={title as string} style={{ padding: "10px 12px", background: C.bgCard,
                 borderRadius: 8, border: `1px solid ${C.border}` }}>
