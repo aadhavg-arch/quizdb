@@ -1,3 +1,7 @@
+"use client";   // ← ADD THIS AS THE VERY FIRST LINE
+
+import { useState } from "react";
+
 // ============================================================
 // NAQT Middle School Quiz Bowl Training App
 // AI-powered questions, TTS reading, timer, scoring
