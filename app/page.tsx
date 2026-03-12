@@ -123,13 +123,13 @@ export default function NAQTQuizBowl(){
   const [correct, setCorrect] = useState(0);
   const [powers,  setPowers]  = useState(0);
 
-  // ── Log ──
-  const [log,setLog]=useState<{role:"reader"|"student"|"judge";text:string}[]>([]);
+  // ── Hint (AI clue panel shown after answering) ──
+  const [hint,        setHint]        = useState("");
+  const [hintLoading, setHintLoading] = useState(false);
 
   // ── DOM refs ──
   const inputRef  = useRef<HTMLInputElement>(null);
   const recognRef = useRef<InstanceType<SRCtor>|null>(null);
-  const logRef    = useRef<HTMLDivElement>(null);
 
   // ── Sync refs (avoid stale closures) ──
   const phaseRef    = useRef<Phase>("idle");
@@ -148,11 +148,9 @@ export default function NAQTQuizBowl(){
     if(timerItvRef.current) clearInterval(timerItvRef.current);
   },[]);
 
-  // ── addLog ──
-  const addLog=useCallback((role:"reader"|"student"|"judge",text:string)=>{
-    setLog(l=>[...l,{role,text}]);
-    setTimeout(()=>logRef.current?.scrollTo({top:logRef.current.scrollHeight,behavior:"smooth"}),50);
-  },[]);
+  // ── addLog (no-op — log panel removed, kept as stable no-op for dep arrays) ──
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const addLog=useCallback((_role:"reader"|"student"|"judge",_text:string)=>{},[]);
 
   // ── speak ──
   const speak=useCallback((text:string,onEnd?:()=>void)=>{
@@ -222,6 +220,18 @@ export default function NAQTQuizBowl(){
     setResult(jResult);
     setPhase("answered");
     setQCount(c=>c+1);
+    // Fetch AI hint clue in background
+    setHint(""); setHintLoading(true);
+    fetch("/api/hint",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        question:q.question, answer:q.answer,
+        category:q.category, subcategory:q.subcategory,
+        studentAnswer:studentAns, correct:jResult.correct,
+      }),
+    }).then(r=>r.json()).then((d:{hint?:string})=>{
+      setHint(d.hint||""); setHintLoading(false);
+    }).catch(()=>setHintLoading(false));
     if(jResult.correct){
       setScore(s=>s+jResult.points); setCorrect(c=>c+1);
       if(power) setPowers(p=>p+1);
@@ -336,8 +346,9 @@ export default function NAQTQuizBowl(){
   const doFetch=useCallback(async(resetHistory=false)=>{
     if(resetHistory) usedIdsRef.current=[];
     setPhase("loading"); setError(""); setQuestion(null); setResult(null);
+    setHint(""); setHintLoading(false);
     setTextAns(""); setVoiceAns(""); setIsPower(false);
-    setDisplayTokens([]); setLitWordIdx(-1); setLog([]); clearTimer();
+    setDisplayTokens([]); setLitWordIdx(-1); clearTimer();
     powerPassedRef.current=false; powerCharIdxRef.current=Infinity;
     window.speechSynthesis?.cancel(); recognRef.current?.abort();
 
@@ -378,7 +389,7 @@ export default function NAQTQuizBowl(){
 
   // Enter key submit
   const handleKey=(e:React.KeyboardEvent)=>{
-    if(e.key==="Enter"&&textAns.trim()){ addLog("student",`"${textAns}"`); submitAnswerRef.current(textAns); }
+    if(e.key==="Enter"&&textAns.trim()){ submitAnswerRef.current(textAns); }
   };
 
   // ── Derived ──
@@ -585,9 +596,9 @@ export default function NAQTQuizBowl(){
             </div>
 
             {/* Action buttons row */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:10}}>
 
-              {/* Generate / Next Question (primary) */}
+              {/* Generate (primary) */}
               <button className="gbtn" onClick={fetchQuestion}
                 disabled={isActive}
                 style={{padding:"14px",borderRadius:12,border:"none",
@@ -599,24 +610,32 @@ export default function NAQTQuizBowl(){
                 {phase==="loading"?"⏳ Loading…":"⚡ Generate Question"}
               </button>
 
-              {/* Refresh — same settings, new random question, DON'T count as answered */}
+              {/* Next Question — enabled only after answering */}
+              <button className="ibtn" onClick={fetchQuestion}
+                disabled={phase!=="answered"}
+                style={{borderColor:C.purple,color:C.purple,
+                  opacity:phase==="answered"?1:0.35,
+                  background:phase==="answered"?C.purpleL:"#f1f3f5",
+                  fontSize:"0.92rem",whiteSpace:"nowrap",padding:"10px 16px"}}>
+                ➡️ Next
+              </button>
+
+              {/* Refresh — new random question, same settings */}
               <button className="ibtn" onClick={refreshQuestion}
                 disabled={isActive}
                 style={{borderColor:C.cyan,color:C.cyan,
                   opacity:isActive?0.4:1,
                   background:isActive?"#f1f3f5":C.cyanL,
-                  fontSize:"0.92rem",whiteSpace:"nowrap",
-                  padding:"10px 18px"}}>
+                  fontSize:"0.92rem",whiteSpace:"nowrap",padding:"10px 16px"}}>
                 🔄 Refresh
               </button>
 
-              {/* Reset history — clear all seen questions */}
+              {/* Reset history */}
               <button className="ibtn" onClick={resetAndFetch}
                 disabled={isActive}
                 style={{borderColor:C.textSoft,color:C.textSoft,
                   opacity:isActive?0.4:1,background:"#fff",
-                  fontSize:"0.92rem",whiteSpace:"nowrap",
-                  padding:"10px 14px"}}>
+                  fontSize:"0.92rem",whiteSpace:"nowrap",padding:"10px 12px"}}>
                 🗑️ Reset
               </button>
             </div>
@@ -703,7 +722,7 @@ export default function NAQTQuizBowl(){
                       style={{flex:1,padding:"13px 14px",background:"#fff",
                         border:`2px solid ${C.blue}`,borderRadius:10,
                         color:C.text,outline:"none",fontSize:"1rem"}}/>
-                    <button onClick={()=>{addLog("student",`"${textAns}"`);submitAnswerRef.current(textAns);}}
+                    <button onClick={()=>{submitAnswerRef.current(textAns);}}
                       disabled={!textAns.trim()}
                       style={{padding:"13px 18px",borderRadius:10,border:"none",
                         background:C.blue,color:"#fff",fontFamily:"system-ui,sans-serif",
@@ -797,14 +816,33 @@ export default function NAQTQuizBowl(){
                     </div>
                   </div>
 
-                  {/* Next Question button — after answering */}
-                  <button className="gbtn" onClick={fetchQuestion}
-                    style={{width:"100%",padding:"15px",borderRadius:12,border:"none",
-                      background:"linear-gradient(135deg,#3b5bdb,#6741d9)",
-                      color:"#fff",fontSize:"1.05rem",fontFamily:"system-ui,sans-serif",
-                      fontWeight:"bold",cursor:"pointer",boxShadow:C.shadowLg}}>
-                    ⚡ Next Question →
-                  </button>
+                  {/* ── Clue Hint Panel ── */}
+                  <div style={{background:"#f0f4ff",border:`1.5px solid ${C.blue}30`,
+                    borderRadius:14,padding:"16px 18px",marginBottom:16}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                      <span style={{fontSize:"1.1rem"}}>💡</span>
+                      <span style={{fontSize:"0.6rem",fontWeight:"bold",letterSpacing:"0.15em",
+                        textTransform:"uppercase",color:C.blue,fontFamily:"system-ui,sans-serif"}}>
+                        Clue Connection — What you should have known
+                      </span>
+                    </div>
+                    {hintLoading?(
+                      <div style={{color:C.textSoft,fontSize:"0.88rem",fontStyle:"italic",
+                        fontFamily:"system-ui,sans-serif"}}>
+                        🤖 AI is analysing the clues…
+                      </div>
+                    ):hint?(
+                      <div style={{fontSize:"0.93rem",color:C.text,lineHeight:1.75,
+                        fontFamily:"Georgia,'Times New Roman',serif"}}>
+                        {hint}
+                      </div>
+                    ):(
+                      <div style={{color:C.textSoft,fontSize:"0.85rem",fontStyle:"italic",
+                        fontFamily:"system-ui,sans-serif"}}>
+                        Hint unavailable — check ANTHROPIC_API_KEY in Vercel settings.
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -822,26 +860,6 @@ export default function NAQTQuizBowl(){
                   </button>
                 </div>
               )}
-            </div>
-          )}
-
-          {/* ══ QUIZ LOG ══ */}
-          {log.length>0&&(
-            <div style={card}>
-              <div style={lbl}>📻 Live Quiz Room</div>
-              <div ref={logRef} style={{maxHeight:185,overflowY:"auto",
-                display:"flex",flexDirection:"column",gap:7}}>
-                {log.map((e,i)=>(
-                  <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
-                    <span style={{fontSize:"0.64rem",fontWeight:"bold",minWidth:58,paddingTop:3,
-                      textTransform:"uppercase",fontFamily:"system-ui,sans-serif",
-                      color:e.role==="reader"?C.cyan:e.role==="student"?C.blue:C.green}}>
-                      {e.role==="reader"?"📖 Reader":e.role==="student"?"🙋 You":"⚖️ Judge"}
-                    </span>
-                    <span style={{fontSize:"0.88rem",color:C.text,lineHeight:1.6}}>{e.text}</span>
-                  </div>
-                ))}
-              </div>
             </div>
           )}
 
@@ -880,8 +898,7 @@ export default function NAQTQuizBowl(){
                   </div>
                 ))}
                 <div style={{display:"flex",alignItems:"center",padding:"0 12px"}}>
-                  <button onClick={()=>{setScore(0);setQCount(0);setCorrect(0);setPowers(0);setLog([]);}}
-                    style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,
+                  <button onClick={()=>{setScore(0);setQCount(0);setCorrect(0);setPowers(0);}}                    style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,
                       padding:"6px 12px",color:C.textSoft,fontSize:"0.78rem",
                       fontFamily:"system-ui,sans-serif",cursor:"pointer"}}>Reset</button>
                 </div>
