@@ -81,9 +81,40 @@ function useTimer() {
   return { elapsed, running, start, stop, reset };
 }
 
+// FIX: Define all Web Speech API types manually.
+// "SpeechRecognition" and "SpeechRecognitionEvent" are browser globals
+// only available when tsconfig has lib:["dom"] — defining them here
+// makes the build work regardless of tsconfig configuration.
+interface SpeechRecognitionResult {
+  readonly length: number;
+  item(index: number): SpeechRecognitionAlternative;
+  [index: number]: SpeechRecognitionAlternative;
+}
+interface SpeechRecognitionAlternative {
+  readonly transcript: string;
+  readonly confidence: number;
+}
+interface SpeechRecognitionResultList {
+  readonly length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
+}
+interface SpeechRecognitionEvent extends Event {
+  readonly results: SpeechRecognitionResultList;
+}
+type SpeechRecognitionConstructor = new () => {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  abort: () => void;
+  onresult: ((e: SpeechRecognitionEvent) => void) | null;
+  onerror: ((e: Event) => void) | null;
+};
+
 interface WindowWithSR extends Window {
-  SpeechRecognition?: typeof SpeechRecognition;
-  webkitSpeechRecognition?: typeof SpeechRecognition;
+  SpeechRecognition?: SpeechRecognitionConstructor;
+  webkitSpeechRecognition?: SpeechRecognitionConstructor;
 }
 
 export default function NAQTQuizBowl() {
@@ -108,7 +139,7 @@ export default function NAQTQuizBowl() {
   const powerMarkIndexRef  = useRef<number>(0);
 
   const answerRef      = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recognitionRef = useRef<InstanceType<SpeechRecognitionConstructor> | null>(null);
 
   const timer = useTimer();
 
@@ -197,7 +228,7 @@ export default function NAQTQuizBowl() {
       answerRef.current?.focus();
       return;
     }
-    const recog = new SR();
+    const recog: InstanceType<SpeechRecognitionConstructor> = new SR();
     recog.lang = "en-US";
     recog.interimResults = false;
     recog.maxAlternatives = 3;
