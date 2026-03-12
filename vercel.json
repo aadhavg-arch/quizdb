@@ -1,80 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-
-  // ─────────────────────────────────────────────────────────────────
-  // PICK YOUR SCENARIO — delete the blocks you don't need
-  // ─────────────────────────────────────────────────────────────────
-
-  // ── SCENARIO A: SPA (React Router / Vue Router / any client-side router)
-  // Needed when: refreshing /about or /dashboard returns 404
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
-  ],
-
-  // ── SCENARIO B: Full-stack Next.js with API routes
-  // (Next.js on Vercel usually needs NO vercel.json at all,
-  //  but add this if you have custom API prefixes or redirects)
-  // "rewrites": [
-  //   { "source": "/api/:path*", "destination": "/api/:path*" }
-  // ],
-
-  // ── SCENARIO C: Redirect www → non-www (or vice versa)
-  // "redirects": [
-  //   {
-  //     "source": "/(.*)",
-  //     "has": [{ "type": "host", "value": "www.yourdomain.com" }],
-  //     "destination": "https://yourdomain.com/$1",
-  //     "permanent": true
-  //   }
-  // ],
-
-  // ── OUTPUT DIRECTORY — must match your build tool's output
-  // Next.js  → omit (Vercel auto-detects)
-  // Vite     → "dist"
-  // CRA      → "build"
-  // "outputDirectory": "dist",
-
-  // ── BUILD COMMAND OVERRIDE (optional — only if Vercel auto-detect is wrong)
-  // "buildCommand": "npm run build",
-  // "installCommand": "npm install",
-  // "devCommand": "npm run dev",
-  // "framework": "nextjs",   // nextjs | vite | create-react-app | nuxtjs | sveltekit
-
-  // ── HEADERS — security headers for all routes
   "headers": [
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Content-Type-Options",    "value": "nosniff" },
-        { "key": "X-Frame-Options",           "value": "DENY" },
-        { "key": "X-XSS-Protection",          "value": "1; mode=block" },
-        { "key": "Referrer-Policy",           "value": "strict-origin-when-cross-origin" }
-      ]
-    },
-    {
-      // Long cache for static assets (hashed filenames, safe to cache forever)
-      "source": "/static/(.*)",
-      "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "X-XSS-Protection", "value": "1; mode=block" }
       ]
     }
-  ],
-
-  // ── REGIONS — where your serverless functions run
-  // Default is "iad1" (US East). Use closest to your users/database.
-  // Options: iad1 (US-E), sfo1 (US-W), lhr1 (EU), sin1 (Asia), etc.
-  // "regions": ["iad1"],
-
-  // ── FUNCTION CONFIG (serverless / edge)
-  // "functions": {
-  //   "api/**/*.js": {
-  //     "runtime": "nodejs20.x",
-  //     "maxDuration": 10
-  //   }
-  // },
-
-  // ── CRONS (Pro/Enterprise only)
-  // "crons": [
-  //   { "path": "/api/cron/daily", "schedule": "0 0 * * *" }
-  // ]
+  ]
 }
