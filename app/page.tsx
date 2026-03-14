@@ -100,9 +100,10 @@ export default function NAQTQuizBowl(){
   // ── Word-by-word display ──
   const [displayTokens, setDisplayTokens] = useState<string[]>([]);
   const [litWordIdx,    setLitWordIdx]    = useState(-1);
-  const ttsWordStartsRef = useRef<number[]>([]);
-  const powerCharIdxRef  = useRef(Infinity);
-  const powerPassedRef   = useRef(false);
+  const ttsWordStartsRef  = useRef<number[]>([]);
+  const powerCharIdxRef   = useRef(Infinity);
+  const powerPassedRef    = useRef(false);
+  const displayTokensRef  = useRef<string[]>([]); // mirror for interval fallback
 
   // ── Countdown timer ──
   const [countdown,    setCountdown]    = useState(0);
@@ -147,6 +148,7 @@ export default function NAQTQuizBowl(){
     window.speechSynthesis?.cancel();
     recognRef.current?.abort();
     if(timerItvRef.current) clearInterval(timerItvRef.current);
+    if(wordSyncItvRef.current) clearInterval(wordSyncItvRef.current);
   },[]);
 
   // ── addLog (no-op — log panel removed, kept as stable no-op for dep arrays) ──
@@ -211,6 +213,7 @@ export default function NAQTQuizBowl(){
     if(phaseRef.current==="answered"||phaseRef.current==="judging") return;
     clearTimer();
     window.speechSynthesis?.cancel();
+    if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
     recognRef.current?.abort();
     const q=questionRef.current; if(!q) return;
     const power=isPowerRef.current;
@@ -279,7 +282,9 @@ export default function NAQTQuizBowl(){
   // ── buzzIn ──
   const buzzIn=useCallback(()=>{
     if(phaseRef.current!=="reading") return;
-    window.speechSynthesis?.cancel(); clearTimer();
+    window.speechSynthesis?.cancel();
+    if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+    clearTimer();
     const power=!powerPassedRef.current;
     setIsPower(power); isPowerRef.current=power;
     setPhase("buzzed");
@@ -309,6 +314,7 @@ export default function NAQTQuizBowl(){
       }else buf+=qText[i];
     }
     if(buf.trim()) tokens.push(buf.trim());
+    displayTokensRef.current = tokens;          // keep ref in sync for interval fallback
     setDisplayTokens(tokens); setLitWordIdx(-1);
     const tts=qText.replace(/\(\*\)/g,"...");
     ttsWordStartsRef.current=buildWordStarts(tts);
@@ -317,30 +323,99 @@ export default function NAQTQuizBowl(){
     powerPassedRef.current=ppos<0;
   },[]);
 
-  // ── readQuestion (TTS with word sync) ──
+  // ── readQuestion (TTS + robust word-by-word sync) ──
+  // Strategy: use boundary events when available (Chrome desktop).
+  // Simultaneously run a setInterval fallback that advances words based on
+  // estimated timing — this covers Safari, Firefox, iOS where boundary
+  // either doesn't fire or only fires per-sentence.
+  const wordSyncItvRef = useRef<ReturnType<typeof setInterval>|null>(null);
+
   const readQuestion=useCallback((qText:string)=>{
     const tts=qText.replace(/\(\*\)/g,"...");
     window.speechSynthesis.cancel();
+    if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+
     const go=()=>{
       const u=new SpeechSynthesisUtterance(tts);
       const v=getUSVoice(); if(v) u.voice=v;
       u.lang="en-US"; u.rate=0.85; u.pitch=1; u.volume=1;
+
+      // ── Track whether boundary events are actually firing ──
+      let boundaryFired = false;
+      let lastBoundaryIdx = -1;
+
+      // ── Method 1: boundary events (Chrome/Edge desktop) ──
       u.addEventListener("boundary",(e:SpeechSynthesisEvent)=>{
-        const ci=e.charIndex;
-        const ws=ttsWordStartsRef.current;
-        let lo=0,hi=ws.length-1,idx=0;
-        while(lo<=hi){const mid=(lo+hi)>>1;if(ws[mid]<=ci){idx=mid;lo=mid+1;}else hi=mid-1;}
+        if(e.name !== "word") return;           // ignore sentence boundaries
+        boundaryFired = true;
+        const ci = e.charIndex;
+        const ws = ttsWordStartsRef.current;
+        let lo=0, hi=ws.length-1, idx=0;
+        while(lo<=hi){const mid=(lo+hi)>>1; if(ws[mid]<=ci){idx=mid;lo=mid+1;}else hi=mid-1;}
+        lastBoundaryIdx = idx;
         setLitWordIdx(idx);
-        if(!powerPassedRef.current&&ci>=powerCharIdxRef.current) powerPassedRef.current=true;
+        if(!powerPassedRef.current && ci>=powerCharIdxRef.current) powerPassedRef.current=true;
       });
+
+      // ── Method 2: interval fallback (Safari / Firefox / iOS / mobile) ──
+      // Estimate: average English TTS at rate=0.85 ≈ 2.8 words/sec → ~357ms/word
+      // We start it after a short delay and only use it when boundary hasn't fired.
+      const MS_PER_WORD = Math.round(1000 / (2.8 * 0.85)); // ~420ms
+      let fallbackIdx = 0;
+      const tokens = ttsWordStartsRef.current; // word count proxy
+
+      setTimeout(()=>{
+        wordSyncItvRef.current = setInterval(()=>{
+          // If boundary events are working, let them drive — don't double-advance
+          if(boundaryFired && lastBoundaryIdx > fallbackIdx){
+            fallbackIdx = lastBoundaryIdx;
+            return;
+          }
+          // Interval fallback: advance one word at a time
+          const totalWords = tokens.length;
+          if(fallbackIdx < totalWords - 1){
+            fallbackIdx++;
+            // Only update state if boundary isn't already ahead
+            setLitWordIdx(prev => {
+              const next = Math.max(prev, fallbackIdx);
+              // Power-passed: count non-(*) words before (*) in displayTokens
+              if(!powerPassedRef.current){
+                const dt = displayTokensRef.current;
+                let wc = 0;
+                for(let i=0;i<dt.length;i++){
+                  if(dt[i]==="(*)"){
+                    if(wc <= next) powerPassedRef.current=true;
+                    break;
+                  }
+                  wc++;
+                }
+              }
+              return next;
+            });
+          } else {
+            if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+          }
+        }, MS_PER_WORD);
+      }, 300); // small delay so first word appears quickly after TTS starts
+
       u.onend=()=>{
+        if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
         setLitWordIdx(Infinity);
         addLog("reader","Reading done — 15 seconds to buzz and answer!");
         startTimer(15);
       };
+
+      u.onerror=()=>{
+        if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+        setLitWordIdx(Infinity);
+        startTimer(15);
+      };
+
       window.speechSynthesis.speak(u);
     };
-    window.speechSynthesis.getVoices().length===0?(window.speechSynthesis.onvoiceschanged=go):go();
+
+    window.speechSynthesis.getVoices().length===0
+      ?(window.speechSynthesis.onvoiceschanged=go):go();
   },[addLog,startTimer]);
 
   // ── Core fetch function (used by Generate, Refresh, Next) ──
@@ -351,7 +426,9 @@ export default function NAQTQuizBowl(){
     setTextAns(""); setVoiceAns(""); setIsPower(false);
     setDisplayTokens([]); setLitWordIdx(-1); clearTimer();
     powerPassedRef.current=false; powerCharIdxRef.current=Infinity;
-    window.speechSynthesis?.cancel(); recognRef.current?.abort();
+    window.speechSynthesis?.cancel();
+    if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+    recognRef.current?.abort();
 
     try{
       const res=await fetch("/api/question",{
