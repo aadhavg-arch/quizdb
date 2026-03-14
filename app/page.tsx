@@ -469,11 +469,12 @@ export default function NAQTQuizBowl(){
         }
         /* Word highlight */
         .w-past{color:#1a1b2e;}
-        .w-current{background:#ffd43b;color:#1a1b2e;border-radius:3px;padding:0 2px;font-weight:bold;transition:background 0.1s;}
-        .w-star{display:inline-flex;align-items:center;gap:3px;background:#f3f0ff;
-          color:#6741d9;padding:2px 8px;border-radius:5px;font-weight:700;
-          font-size:0.8em;border:1.5px solid #6741d990;margin:0 3px;vertical-align:middle;}
-        @keyframes fadeWord{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+        .w-current{background:#ffd43b;color:#1a1b2e;border-radius:3px;padding:1px 3px;font-weight:700;box-shadow:0 0 0 2px #ffd43b66;}
+        .w-star{display:inline-flex;align-items:center;gap:4px;background:#fff0f3;
+          color:#c92a2a;padding:2px 10px;border-radius:6px;font-weight:800;
+          font-size:0.78em;border:2px solid #c92a2a80;margin:0 4px;vertical-align:middle;
+          letter-spacing:0.04em;}
+        @keyframes popIn{0%{background:#ffe066;transform:scale(1.12)}100%{background:#ffd43b;transform:scale(1)}}
         @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
         @media(hover:hover){.gbtn:hover{filter:brightness(1.08);transform:translateY(-1px);}}
         .gbtn:active{opacity:0.85;}
@@ -735,7 +736,7 @@ export default function NAQTQuizBowl(){
                 )}
               </div>
 
-              {/* Word-by-word question text — future words are hidden until spoken */}
+              {/* Word-by-word question text — future words hidden until spoken */}
               <div style={{
                 background:C.cardAlt,border:`1.5px solid ${C.border}`,
                 borderRadius:12,padding:"18px 20px",marginBottom:16,
@@ -748,7 +749,7 @@ export default function NAQTQuizBowl(){
                     Waiting for question…
                   </span>
                 ) : litWordIdx===-1 ? (
-                  /* TTS hasn't started yet — show a blinking cursor */
+                  /* TTS hasn't fired yet — blinking cursor */
                   <span style={{display:"inline-block",width:10,height:"1.1em",
                     background:C.cyan,borderRadius:2,verticalAlign:"middle",
                     animation:"blink 0.9s step-end infinite"}}/>
@@ -756,24 +757,27 @@ export default function NAQTQuizBowl(){
                   displayTokens.map((tok, i) => {
                     const allDone = litWordIdx === Infinity;
 
-                    // Hide tokens that haven't been spoken yet
+                    // ── Future words: completely hidden ──
                     if (!allDone && i > litWordIdx) return null;
 
-                    // ★ Power marker — only reveal when TTS has reached/passed it
+                    // ── ⚡ BUZZ power marker ──
+                    // Hidden until TTS reaches it; then stays as a permanent landmark
                     if (tok === "(*)") {
                       return (
-                        <span key={i} className="w-star"
-                          style={{animation: allDone||i<=litWordIdx ? "none" : "fadeWord 0.3s ease"}}>
-                          ⚡ BUZZ
+                        <span key={i} className="w-star">
+                          ★ BUZZ HERE
                         </span>
                       );
                     }
 
                     const isCurrent = !allDone && i === litWordIdx;
+                    // Only the word that just appeared (current) gets a fade-in.
+                    // Past words are already visible — no re-animation on re-render.
                     return (
-                      <span key={i}
-                        className={isCurrent ? "w-current" : "w-past"}
-                        style={isCurrent ? {} : {animation:"fadeWord 0.25s ease"}}>
+                      <span key={i} className={isCurrent ? "w-current" : "w-past"}
+                        style={isCurrent
+                          ? {animation:"popIn 0.15s ease"}
+                          : undefined}>
                         {tok}{" "}
                       </span>
                     );
