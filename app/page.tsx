@@ -470,10 +470,11 @@ export default function NAQTQuizBowl(){
         /* Word highlight */
         .w-past{color:#1a1b2e;}
         .w-current{background:#ffd43b;color:#1a1b2e;border-radius:3px;padding:0 2px;font-weight:bold;transition:background 0.1s;}
-        .w-future{color:#adb5bd;}
         .w-star{display:inline-flex;align-items:center;gap:3px;background:#f3f0ff;
           color:#6741d9;padding:2px 8px;border-radius:5px;font-weight:700;
           font-size:0.8em;border:1.5px solid #6741d990;margin:0 3px;vertical-align:middle;}
+        @keyframes fadeWord{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
         @media(hover:hover){.gbtn:hover{filter:brightness(1.08);transform:translateY(-1px);}}
         .gbtn:active{opacity:0.85;}
         .ibtn{background:none;border:1.5px solid;border-radius:10px;
@@ -515,6 +516,16 @@ export default function NAQTQuizBowl(){
                     letterSpacing:"0.1em",fontFamily:"system-ui,sans-serif"}}>{l}</div>
                 </div>
               ))}
+              {/* Logout */}
+              <button onClick={async()=>{
+                await fetch("/api/auth",{method:"DELETE"});
+                window.location.href="/login";
+              }} style={{padding:"6px 12px",borderRadius:9,border:`1.5px solid ${C.border}`,
+                background:"#fff",color:C.textSoft,cursor:"pointer",fontSize:"0.78rem",
+                fontFamily:"system-ui,sans-serif",whiteSpace:"nowrap",
+                display:"flex",alignItems:"center",gap:5}}>
+                🚪 Sign Out
+              </button>
             </div>
           </div>
         </header>
@@ -724,18 +735,50 @@ export default function NAQTQuizBowl(){
                 )}
               </div>
 
-              {/* Word-by-word question text */}
-              <div style={{background:C.cardAlt,border:`1.5px solid ${C.border}`,
+              {/* Word-by-word question text — future words are hidden until spoken */}
+              <div style={{
+                background:C.cardAlt,border:`1.5px solid ${C.border}`,
                 borderRadius:12,padding:"18px 20px",marginBottom:16,
-                lineHeight:2.0,fontSize:"clamp(0.95rem,2.5vw,1.08rem)"}}>
-                {displayTokens.length===0
-                  ?<span style={{color:C.textSoft}}>Loading…</span>
-                  :displayTokens.map((tok,i)=>{
-                    if(tok==="(*)") return <span key={i} className="w-star">⚡ BUZZ</span>;
-                    const st=litWordIdx===Infinity?"past":i<litWordIdx?"past":i===litWordIdx?"current":"future";
-                    return <span key={i} className={`w-${st}`}>{tok}{" "}</span>;
+                lineHeight:2.2,fontSize:"clamp(0.95rem,2.5vw,1.1rem)",
+                minHeight:80,
+              }}>
+                {displayTokens.length===0 ? (
+                  <span style={{color:C.textSoft,fontStyle:"italic",
+                    fontFamily:"system-ui,sans-serif"}}>
+                    Waiting for question…
+                  </span>
+                ) : litWordIdx===-1 ? (
+                  /* TTS hasn't started yet — show a blinking cursor */
+                  <span style={{display:"inline-block",width:10,height:"1.1em",
+                    background:C.cyan,borderRadius:2,verticalAlign:"middle",
+                    animation:"blink 0.9s step-end infinite"}}/>
+                ) : (
+                  displayTokens.map((tok, i) => {
+                    const allDone = litWordIdx === Infinity;
+
+                    // Hide tokens that haven't been spoken yet
+                    if (!allDone && i > litWordIdx) return null;
+
+                    // ★ Power marker — only reveal when TTS has reached/passed it
+                    if (tok === "(*)") {
+                      return (
+                        <span key={i} className="w-star"
+                          style={{animation: allDone||i<=litWordIdx ? "none" : "fadeWord 0.3s ease"}}>
+                          ⚡ BUZZ
+                        </span>
+                      );
+                    }
+
+                    const isCurrent = !allDone && i === litWordIdx;
+                    return (
+                      <span key={i}
+                        className={isCurrent ? "w-current" : "w-past"}
+                        style={isCurrent ? {} : {animation:"fadeWord 0.25s ease"}}>
+                        {tok}{" "}
+                      </span>
+                    );
                   })
-                }
+                )}
               </div>
 
               {/* Text input */}
