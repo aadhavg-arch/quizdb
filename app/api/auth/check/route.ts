@@ -1,13 +1,22 @@
 // app/api/auth/check/route.ts
-// Simple endpoint the login page hits to test if the session cookie is valid.
-// Returns 200 if logged in, 401 if not — no body needed.
+// Called by the login page to skip re-login if the session is still valid.
+
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(req: NextRequest) {
-  const session = req.cookies.get("qb_session")?.value;
-  const secret  = process.env.SESSION_SECRET ?? "qb_secret_change_me";
-  if (session && session === secret) {
-    return NextResponse.json({ ok: true });
+  const secret = process.env.SESSION_SECRET;
+  const cookie = req.cookies.get("qb_session")?.value ?? "";
+  const parts  = cookie.split("__");
+
+  const valid = (
+    parts.length === 2 &&
+    parts[0].length > 0 &&
+    secret &&
+    parts[1] === secret
+  );
+
+  if (valid) {
+    return NextResponse.json({ ok: true, userId: parts[0] });
   }
   return NextResponse.json({ ok: false }, { status: 401 });
 }
