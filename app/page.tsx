@@ -81,6 +81,15 @@ function buildWordStarts(s:string):number[]{
 // ═══════════════════════════════════════════════════════
 export default function NAQTQuizBowl(){
 
+  // ── Logged-in user (read from session on mount) ──
+  const [loggedInUser, setLoggedInUser] = useState("");
+  useEffect(()=>{
+    fetch("/api/auth/check")
+      .then(r=>r.json())
+      .then((d:{ok?:boolean;userId?:string})=>{ if(d.ok&&d.userId) setLoggedInUser(d.userId); })
+      .catch(()=>{});
+  },[]);
+
   // ── Config ──
   const [category,   setCategory]   = useState(CATEGORIES[0]);
   const [subArea,    setSubArea]    = useState("All Sub-Areas");
@@ -594,16 +603,29 @@ export default function NAQTQuizBowl(){
                     letterSpacing:"0.1em",fontFamily:"system-ui,sans-serif"}}>{l}</div>
                 </div>
               ))}
-              {/* Logout */}
-              <button onClick={async()=>{
-                await fetch("/api/auth",{method:"DELETE"});
-                window.location.href="/login";
-              }} style={{padding:"6px 12px",borderRadius:9,border:`1.5px solid ${C.border}`,
-                background:"#fff",color:C.textSoft,cursor:"pointer",fontSize:"0.78rem",
-                fontFamily:"system-ui,sans-serif",whiteSpace:"nowrap",
-                display:"flex",alignItems:"center",gap:5}}>
-                🚪 Sign Out
-              </button>
+              {/* User info + Logout */}
+              <div style={{display:"flex",alignItems:"center",gap:8,
+                background:C.cardAlt,borderRadius:10,border:`1.5px solid ${C.border}`,
+                padding:"5px 10px"}}>
+                {loggedInUser&&(
+                  <div style={{textAlign:"center"}}>
+                    <div style={{fontSize:"0.75rem",fontWeight:"bold",color:C.blue,lineHeight:1}}>
+                      👤 {loggedInUser}
+                    </div>
+                    <div style={{fontSize:"0.52rem",color:C.textSoft,textTransform:"uppercase",
+                      letterSpacing:"0.1em",fontFamily:"system-ui,sans-serif"}}>Logged in</div>
+                  </div>
+                )}
+                <button onClick={async()=>{
+                  await fetch("/api/auth",{method:"DELETE"});
+                  window.location.href="/login";
+                }} style={{padding:"5px 10px",borderRadius:7,border:`1.5px solid ${C.red}40`,
+                  background:C.redL,color:C.red,cursor:"pointer",fontSize:"0.75rem",
+                  fontFamily:"system-ui,sans-serif",whiteSpace:"nowrap",fontWeight:600,
+                  display:"flex",alignItems:"center",gap:4}}>
+                  🚪 Sign Out
+                </button>
+              </div>
             </div>
           </div>
         </header>
