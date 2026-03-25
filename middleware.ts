@@ -1,37 +1,43 @@
-// middleware.ts  ← ROOT of repo (same level as package.json, NOT inside app/)
+// middleware.ts
+// ⚠️  MUST be at the ROOT of the repo — same folder as package.json
+// ⚠️  NOT inside app/, pages/, or src/
+
 import { NextRequest, NextResponse } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/api/auth"];
+const PUBLIC = ["/login", "/api/auth"];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Always allow login page, auth API, and Next.js internals
+  // Always allow: login page, auth API, Next.js internals, favicon
   if (
-    PUBLIC_PATHS.some(p => pathname.startsWith(p)) ||
-    pathname.startsWith("/_next") ||
-    pathname.startsWith("/favicon")
+    PUBLIC.some(p => pathname === p || pathname.startsWith(p + "/")) ||
+    pathname.startsWith("/_next/") ||
+    pathname === "/favicon.ico"
   ) {
     return NextResponse.next();
   }
 
-  // Every other route requires a valid session cookie
-  const session = req.cookies.get("qb_session")?.value;
-  if (!session) {
-    // Not logged in → redirect to /login, preserving the original URL as ?next=
-    const loginUrl = req.nextUrl.clone();
-    loginUrl.pathname = "/login";
-    loginUrl.searchParams.set("next", pathname);
-    return NextResponse.redirect(loginUrl);
-  }
+  // ── Validate session cookie ──────────────────────────────────────────────
+  // Cookie format:  userId__SECRET
+  // Both halves must be present and the SECRET half must match the env var.
+  const secret  = process.env.SESSION_SECRET;
+  const cookie  = req.cookies.get("qb_session")?.value ?? "";
+  const parts   = cookie.split("__");
+  const isValid = (
+    parts.length === 2 &&
+    parts[0].length > 0 &&
+    parts[1].length > 0 &&
+    secret &&                        // secret MUST be set in Vercel env vars
+    parts[1] === secret
+  );
 
-  // Validate the cookie value against SESSION_SECRET
-  const secret = process.env.SESSION_SECRET ?? "qb_secret_change_me";
-  if (session !== secret) {
-    const loginUrl = req.nextUrl.clone();
-    loginUrl.pathname = "/login";
-    const res = NextResponse.redirect(loginUrl);
-    // Clear the invalid cookie
+  if (!isValid) {
+    // Wipe any stale / invalid cookie and redirect to login
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.search   = `?next=${encodeURIComponent(pathname)}`;
+    const res = NextResponse.redirect(url);
     res.cookies.set("qb_session", "", { maxAge: 0, path: "/" });
     return res;
   }
@@ -40,6 +46,13 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // Protect every route except Next.js static files and image optimiser
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    /*
+     * Match all request paths EXCEPT:
+     * - _next/static  (static files)
+     * - _next/image   (image optimisation)
+     * - favicon.ico
+     */
+    "/((?!_next/static|_next/image|favicon\\.ico).*)",
+  ],
 };
