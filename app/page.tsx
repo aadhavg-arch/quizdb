@@ -128,6 +128,9 @@ export default function NAQTQuizBowl(){
   // CHANGED: default mode is "voice" instead of "text"
   const [mode,     setMode]     = useState<"text"|"voice">("voice");
   const [isPaused, setIsPaused] = useState(false);
+  // FIX: keep a ref in sync so the word-reveal timeouts can read current paused state
+  const isPausedRef = useRef(false);
+  useEffect(()=>{ isPausedRef.current = isPaused; },[isPaused]);
 
   // ── Score ──
   const [score,   setScore]   = useState(0);
@@ -390,57 +393,66 @@ export default function NAQTQuizBowl(){
     const go=()=>{
       const u=new SpeechSynthesisUtterance(tts);
       const v=getUSVoice(); if(v) u.voice=v;
-      // CHANGED: keep rate at 0.85 — DO NOT change; the scheduler is calibrated to this
       u.lang="en-US"; u.rate=0.85; u.pitch=1; u.volume=1;
 
       const TTS_RATE = 0.85;
 
-      // ── Pre-compute per-word reveal offsets (ms from TTS start) ──────────
-      // Split the TTS string into words to measure each word's character length.
+      // ── Pre-compute per-word reveal offsets (ms from the moment TTS actually starts) ──
       const ttsWords = tts.match(/\S+/g) ?? [];
-      // CHANGED: word-length-weighted timing instead of flat 420ms
-      // base = 200ms + 45ms per character, clamped to [180, 900] ms per word
+      // word-length-weighted timing: base 180ms + 55ms/char, calibrated to rate=0.85
+      // This matches how TTS engines spend more time on longer/harder words.
       const msPerWord = (chars:number) =>
-        Math.min(900, Math.max(180, Math.round((200 + chars * 45) / TTS_RATE)));
+        Math.min(850, Math.max(160, Math.round((180 + chars * 55) / TTS_RATE)));
 
-      // Build cumulative reveal times for each word index
+      // Build cumulative reveal times relative to TTS start (not speak() call)
       const revealAt: number[] = [];
-      let elapsed = 250; // small lead-in before first word appears
+      let elapsed = 80; // tiny offset so first word appears just as it's spoken
       for(let i=0;i<ttsWords.length;i++){
         revealAt.push(elapsed);
         elapsed += msPerWord(ttsWords[i].length);
       }
 
-      // ── Schedule word reveals using setTimeout chains ─────────────────────
-      // Each timeout fires independently — no drift accumulation.
       let boundaryFired = false;
 
-      const scheduleWord = (idx:number)=>{
-        if(idx >= ttsWords.length) return;
-        const id = setTimeout(()=>{
-          // CHANGED: if boundary events are ahead, do not go backwards
-          setLitWordIdx(prev => {
-            const next = Math.max(prev, idx);
-            // Update power-passed marker
-            if(!powerPassedRef.current){
-              const dt = displayTokensRef.current;
-              let wc=0;
-              for(let i=0;i<dt.length;i++){
-                if(dt[i]==="(*)"){
-                  if(wc <= next) powerPassedRef.current=true;
-                  break;
+      // ── FIX: Schedule word reveals from u.onstart, not from go() ──────────
+      // TTS engines have 100–500ms startup latency between speak() and the first
+      // sound. Starting timeouts from go() makes words appear before TTS speaks.
+      // u.onstart fires the instant audio begins — this is the true t=0.
+      u.onstart = () => {
+        // All timeouts now start from the exact moment TTS begins playing
+        for(let i=0;i<ttsWords.length;i++){
+          (( idx:number )=>{
+            const id = setTimeout(()=>{
+              if(isPausedRef.current){
+                const remaining: number[] = [];
+                let gap = 0;
+                for(let j=idx;j<ttsWords.length;j++){
+                  remaining.push(gap);
+                  gap += msPerWord(ttsWords[j]?.length ?? 4);
                 }
-                wc++;
+                wordOffsetsRef.current = remaining;
+                return;
               }
-            }
-            return next;
-          });
-        }, revealAt[idx]);
-        wordTimeoutsRef.current.push(id);
+              setLitWordIdx(prev => {
+                const next = Math.max(prev, idx);
+                if(!powerPassedRef.current){
+                  const dt = displayTokensRef.current;
+                  let wc=0;
+                  for(let k=0;k<dt.length;k++){
+                    if(dt[k]==="(*)"){
+                      if(wc <= next) powerPassedRef.current=true;
+                      break;
+                    }
+                    wc++;
+                  }
+                }
+                return next;
+              });
+            }, revealAt[idx]);
+            wordTimeoutsRef.current.push(id);
+          })(i);
+        }
       };
-
-      // Schedule all words up front
-      for(let i=0;i<ttsWords.length;i++) scheduleWord(i);
 
       // ── Method 1: boundary events (Chrome/Edge) ──────────────────────────
       // When boundary events fire they take over — they're more accurate than
@@ -487,7 +499,9 @@ export default function NAQTQuizBowl(){
   const doFetch=useCallback(async(resetHistory=false)=>{
     if(resetHistory) usedIdsRef.current=[];
     setPhase("loading"); setError(""); setQuestion(null); setResult(null);
-    setHint(""); setHintLoading(false); setIsPaused(false);
+    setHint(""); setHintLoading(false);
+    setIsPaused(false); isPausedRef.current=false;
+    wordOffsetsRef.current=[];
     setTextAns(""); setVoiceAns(""); setIsPower(false);
     setDisplayTokens([]); setLitWordIdx(-1); clearTimer();
     powerPassedRef.current=false; powerCharIdxRef.current=Infinity;
@@ -530,16 +544,68 @@ export default function NAQTQuizBowl(){
   const resetAndFetch   = useCallback(()=>doFetch(true), [doFetch]);
 
   // ── Pause / Resume TTS reading ──
+  // FIX: when pausing, record the timestamp so we can offset word-reveal
+  //      timeouts correctly when resuming.
+  const pausedAtRef   = useRef<number>(0);   // wall-clock ms when pause started
+  const wordOffsetsRef = useRef<number[]>([]); // remaining ms for each pending word at pause time
+
   const togglePause = useCallback(()=>{
     if(phaseRef.current !== "reading") return;
-    if(!isPaused){
+
+    // Re-read the actual synthesis state so we never desync
+    const actuallyPaused = window.speechSynthesis.paused;
+
+    if(!actuallyPaused && !isPausedRef.current){
+      // ── PAUSE ──
       window.speechSynthesis.pause();
+      isPausedRef.current = true;
       setIsPaused(true);
+      pausedAtRef.current = performance.now();
+
+      // Cancel all pending word-reveal timeouts while paused
+      wordTimeoutsRef.current.forEach(id => clearTimeout(id));
+      wordTimeoutsRef.current = [];
+
     } else {
+      // ── RESUME ──
       window.speechSynthesis.resume();
+      isPausedRef.current = false;
       setIsPaused(false);
+
+      // Reschedule remaining word reveals offset by how long we were paused.
+      // The word scheduler in readQuestion already pre-computed revealAt[] times
+      // relative to when TTS started.  We re-apply those times starting NOW.
+      const pauseDuration = performance.now() - pausedAtRef.current;
+      const currentIdx = (()=>{ let idx=-1; setLitWordIdx(p=>{ idx=p; return p; }); return idx; })();
+
+      // Rebuild timeouts for words we haven't revealed yet
+      // Use the stored per-word offsets (saved in wordOffsetsRef when pausing)
+      wordOffsetsRef.current.forEach((delay, i) => {
+        const wordIdx = currentIdx + 1 + i;
+        const id = setTimeout(()=>{
+          if(isPausedRef.current) return; // still paused somehow — skip
+          setLitWordIdx(prev => {
+            const next = Math.max(prev, wordIdx);
+            if(!powerPassedRef.current){
+              const dt = displayTokensRef.current;
+              let wc=0;
+              for(let j=0;j<dt.length;j++){
+                if(dt[j]==="(*)"){
+                  if(wc <= next) powerPassedRef.current=true;
+                  break;
+                }
+                wc++;
+              }
+            }
+            return next;
+          });
+        }, delay);
+        wordTimeoutsRef.current.push(id);
+      });
+      wordOffsetsRef.current = [];
     }
-  },[isPaused]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
 
   // Enter key submit
   const handleKey=(e:React.KeyboardEvent)=>{
@@ -755,19 +821,21 @@ export default function NAQTQuizBowl(){
                 </select>
               </div>
 
-              {/* Answer mode */}
+              {/* Answer mode — Voice is default and rendered first */}
               <div>
                 <label style={lbl}>Answer by</label>
                 <div style={{display:"flex",gap:8}}>
-                  {(["text","voice"] as const).map(m=>(
-                    <button key={m} onClick={()=>setMode(m)} style={{
-                      flex:1,padding:"10px 6px",borderRadius:10,
-                      border:`2px solid ${mode===m?C.blue:C.border}`,
-                      background:mode===m?C.blue:"#fff",
-                      color:mode===m?"#fff":C.textMid,
-                      fontFamily:"system-ui,sans-serif",fontWeight:mode===m?700:400,
-                      cursor:"pointer",fontSize:"0.88rem",transition:"all 0.15s"}}>
-                      {m==="text"?"⌨️ Type":"🎤 Voice"}
+                  {(["voice","text"] as const).map(m=>(
+                    <button key={m} onClick={()=>setMode(m)}
+                      aria-pressed={mode===m}
+                      style={{
+                        flex:1,padding:"10px 6px",borderRadius:10,
+                        border:`2px solid ${mode===m?C.blue:C.border}`,
+                        background:mode===m?C.blue:"#fff",
+                        color:mode===m?"#fff":C.textMid,
+                        fontFamily:"system-ui,sans-serif",fontWeight:mode===m?700:400,
+                        cursor:"pointer",fontSize:"0.88rem",transition:"all 0.15s"}}>
+                      {m==="voice"?"🎤 Voice":"⌨️ Type"}
                     </button>
                   ))}
                 </div>
@@ -800,6 +868,8 @@ export default function NAQTQuizBowl(){
               </button>
 
               {/* Pause / Start — only active while reading */}
+              {/* FIX: label driven by isPaused state, which is kept in sync with
+                  speechSynthesis.paused via isPausedRef */}
               <button className="ibtn" onClick={togglePause}
                 disabled={phase!=="reading"}
                 style={{
@@ -810,7 +880,9 @@ export default function NAQTQuizBowl(){
                   fontSize:"0.92rem", whiteSpace:"nowrap", padding:"10px 16px",
                   transition:"all 0.2s",
                 }}>
-                {isPaused ? "▶️ Start" : "⏸ Pause"}
+                {/* ⏸ = currently playing → click to pause */}
+                {/* ▶️ = currently paused  → click to resume */}
+                {isPaused ? "▶️ Resume" : "⏸ Pause"}
               </button>
 
               {/* Refresh — new random question, same settings */}
