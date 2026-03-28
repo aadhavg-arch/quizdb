@@ -1,5 +1,5 @@
-// app/api/judge/route.ts  ← exact file path in your repo
-// Two-step answer judging: QB Reader check-answer API, then Anthropic for fuzzy/typo matching
+// app/api/judge/route.ts
+// CHANGED: handles pipe-joined voice alternatives for phonetic near-match judging
 
 import { NextRequest, NextResponse } from "next/server";
 
@@ -20,55 +20,76 @@ export async function POST(req: NextRequest) {
 
   const basePts = isPower ? 15 : 10;
 
-  // ── Step 1: No answer at all → 0 pts ──
+  // ── No answer at all → 0 pts ──────────────────────────────────────────────
   if (!studentAnswer) {
     return NextResponse.json({ correct: false, points: 0, reason: "No answer given — time ran out." });
   }
 
-  // ── Step 2: QB Reader check-answer (official fuzzy match) ──
+  // CHANGED: Voice recognition sends up to 5 alternatives joined by "|".
+  // Split them so we can check each one independently.
+  const alternatives = studentAnswer.split("|").map(s => s.trim()).filter(Boolean);
+  const primaryAnswer = alternatives[0]; // shown to student in UI
+
+  // ── Step 1: Try QB Reader check-answer for EACH alternative ──────────────
+  // Accept on first "accept" directive found across all alternatives.
   let directive = "reject";
-  try {
-    const u = new URL("https://www.qbreader.org/api/check-answer");
-    u.searchParams.set("answerline",   answer);
-    u.searchParams.set("givenAnswer",  studentAnswer);
-    const cr = await fetch(u.toString(), { signal: AbortSignal.timeout(5000) });
-    if (cr.ok) {
-      const cd = await cr.json() as { directive?: string };
-      directive = cd.directive ?? "reject";
-    }
-  } catch { /* fall through to Anthropic */ }
+  let acceptedAlt = "";
+
+  for (const alt of alternatives) {
+    try {
+      const u = new URL("https://www.qbreader.org/api/check-answer");
+      u.searchParams.set("answerline",  answer);
+      u.searchParams.set("givenAnswer", alt);
+      const cr = await fetch(u.toString(), { signal: AbortSignal.timeout(5000) });
+      if (cr.ok) {
+        const cd = await cr.json() as { directive?: string };
+        const d = cd.directive ?? "reject";
+        if (d === "accept") { directive = "accept"; acceptedAlt = alt; break; }
+        if (d === "prompt" && directive === "reject") directive = "prompt"; // keep best
+      }
+    } catch { /* fall through */ }
+  }
 
   if (directive === "accept") {
-    return NextResponse.json({ correct: true, points: basePts, reason: "Correct! Well done." });
+    const note = acceptedAlt !== primaryAnswer ? ` (matched: "${acceptedAlt}")` : "";
+    return NextResponse.json({ correct: true, points: basePts, reason: `Correct!${note}` });
   }
 
-  // ── Step 3: Anthropic fuzzy / typo judge ──
+  // ── Step 2: Anthropic phonetic + fuzzy judge ──────────────────────────────
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    // Fallback: simple normalised string match
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g," ").trim();
-    const na = norm(answer), ns = norm(studentAnswer);
-    const ok = na === ns || na.includes(ns) || ns.includes(na.split(" ").slice(-1)[0]);
+    // Fallback: simple normalised string match across all alternatives
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+    const na = norm(answer);
+    const ok = alternatives.some(alt => {
+      const ns = norm(alt);
+      return na === ns || na.includes(ns) || ns.includes(na.split(" ").slice(-1)[0]);
+    });
     return NextResponse.json({ correct: ok, points: ok ? basePts : 0, reason: ok ? "Correct!" : "Incorrect." });
   }
+
+  // CHANGED: pass ALL alternatives to the AI so it can accept near-pronunciations
+  // (e.g. "Napoleon Bonaparte" heard as "Napoleon Bone apart" → still correct)
+  const altList = alternatives.map((a, i) => `  Alternative ${i+1}: "${a}"`).join("\n");
 
   const prompt = `You are a strict but fair quiz bowl judge for a middle school competition.
 
 Correct answer: "${answer}"
-Student's answer: "${studentAnswer}"
-QB Reader directive: "${directive}" (prompt = needs more specificity, reject = wrong)
+Student's voice recognition produced these alternatives (most likely first):
+${altList}
+QB Reader directive for the primary alternative: "${directive}" (prompt = needs specificity, reject = wrong)
 
-Decide if the student should get credit. Consider:
-- Minor typos / misspellings that sound the same when spoken aloud (e.g. "Einstien" for "Einstein" → accept)
-- Common alternate names, abbreviations, or partial last names that clearly identify the answer
-- "Prompt" means the student was vague — judge whether the vague answer still merits credit at middle school level
-- "Reject" from QB Reader is a strong signal, override only for obvious typos
+Judge whether ANY of the alternatives should receive credit. Rules:
+1. PHONETIC NEAR-MATCH: If any alternative sounds like the correct answer when spoken aloud, even with speech recognition errors (e.g. "Tolstoy" heard as "tall story", "Tchaikovsky" as "chai coffee", "Napoleon" as "Nap oleon"), accept it.
+2. TYPOS / RECOGNITION ERRORS: Common speech-to-text mishearings of proper nouns should be accepted.
+3. PARTIAL: Last name alone is usually sufficient for a person's name.
+4. VAGUE: If "prompt" and the alternative is clearly the right topic, accept at middle school level.
+5. WRONG: If none of the alternatives are phonetically or semantically close, reject.
 
-If the answer should be accepted: give ${basePts} points.
-If it should be rejected: give 0 points.
+Award ${basePts} points if correct, 0 if not.
 
 Return ONLY valid JSON, nothing else:
-{"correct":boolean,"points":number,"reason":"one short sentence for the student"}`;
+{"correct":boolean,"points":number,"reason":"one friendly sentence for the student"}`;
 
   try {
     const air = await fetch("https://api.anthropic.com/v1/messages", {
@@ -87,7 +108,7 @@ Return ONLY valid JSON, nothing else:
     });
 
     const aid = await air.json() as { content?: Array<{ type: string; text: string }> };
-    const raw  = aid.content?.find(b => b.type === "text")?.text ?? "";
+    const raw   = aid.content?.find(b => b.type === "text")?.text ?? "";
     const clean = raw.replace(/```[a-z]*\n?/gi, "").replace(/```/g, "").trim();
     const parsed = JSON.parse(clean) as { correct: boolean; points: number; reason: string };
     return NextResponse.json(parsed);
