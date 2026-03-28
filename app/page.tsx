@@ -125,8 +125,10 @@ export default function NAQTQuizBowl(){
   const [voiceAns, setVoiceAns] = useState("");
   const [result,   setResult]   = useState<JudgeResult|null>(null);
   const [isPower,  setIsPower]  = useState(false);
-  // CHANGED: default mode is "voice" instead of "text"
-  const [mode,     setMode]     = useState<"text"|"voice">("voice");
+  // Start with "text" on server (SSR-safe), then switch to "voice" on client mount.
+  // This prevents Next.js hydration mismatch while ensuring Voice is always pre-selected.
+  const [mode, setMode] = useState<"text"|"voice">("text");
+  useEffect(() => { setMode("voice"); }, []); // runs only on client, after hydration
   const [isPaused, setIsPaused] = useState(false);
   // FIX: keep a ref in sync so the word-reveal timeouts can read current paused state
   const isPausedRef = useRef(false);
@@ -413,62 +415,100 @@ export default function NAQTQuizBowl(){
       }
 
       let boundaryFired = false;
+      // Record wall-clock time the moment speak() is called.
+      // The first boundary event tells us the actual startup latency so we can
+      // adjust the fallback scheduler to match reality.
+      let speakCalledAt = 0;
+      let startupLatencyMs = 150; // conservative default if boundary never fires
+      let latencyMeasured = false;
 
-      // ── FIX: Schedule word reveals from u.onstart, not from go() ──────────
-      // TTS engines have 100–500ms startup latency between speak() and the first
-      // sound. Starting timeouts from go() makes words appear before TTS speaks.
-      // u.onstart fires the instant audio begins — this is the true t=0.
-      u.onstart = () => {
-        // All timeouts now start from the exact moment TTS begins playing
-        for(let i=0;i<ttsWords.length;i++){
-          (( idx:number )=>{
-            const id = setTimeout(()=>{
-              if(isPausedRef.current){
-                const remaining: number[] = [];
-                let gap = 0;
-                for(let j=idx;j<ttsWords.length;j++){
-                  remaining.push(gap);
-                  gap += msPerWord(ttsWords[j]?.length ?? 4);
-                }
-                wordOffsetsRef.current = remaining;
-                return;
-              }
-              setLitWordIdx(prev => {
-                const next = Math.max(prev, idx);
-                if(!powerPassedRef.current){
-                  const dt = displayTokensRef.current;
-                  let wc=0;
-                  for(let k=0;k<dt.length;k++){
-                    if(dt[k]==="(*)"){
-                      if(wc <= next) powerPassedRef.current=true;
-                      break;
-                    }
-                    wc++;
-                  }
-                }
-                return next;
-              });
-            }, revealAt[idx]);
-            wordTimeoutsRef.current.push(id);
-          })(i);
-        }
-      };
-
-      // ── Method 1: boundary events (Chrome/Edge) ──────────────────────────
-      // When boundary events fire they take over — they're more accurate than
-      // the scheduler.  We still let the scheduler run because cancelling it
-      // mid-flight is unreliable across browsers.
+      // ── Method 1: boundary events (Chrome/Edge) — most accurate ────────────
       u.addEventListener("boundary",(e:SpeechSynthesisEvent)=>{
         if(e.name !== "word") return;
+
+        // On the FIRST boundary event, measure the real startup latency and
+        // cancel + re-anchor any pending fallback timeouts.
+        if(!latencyMeasured && speakCalledAt > 0){
+          latencyMeasured = true;
+          startupLatencyMs = performance.now() - speakCalledAt;
+          // Cancel all pending fallback timeouts (they were scheduled with the
+          // estimated latency). Re-schedule remaining words from NOW.
+          wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
+          wordTimeoutsRef.current=[];
+
+          const ci = e.charIndex;
+          const ws = ttsWordStartsRef.current;
+          let lo=0, hi=ws.length-1, curIdx=0;
+          while(lo<=hi){const mid=(lo+hi)>>1; if(ws[mid]<=ci){curIdx=mid;lo=mid+1;}else hi=mid-1;}
+
+          // Re-schedule words after the current one using corrected timing
+          for(let j=curIdx+1; j<ttsWords.length; j++){
+            ((idx:number)=>{
+              // revealAt[idx] is from TTS start; subtract already-elapsed time
+              const alreadyElapsed = startupLatencyMs + (performance.now() - speakCalledAt - startupLatencyMs);
+              const remaining = Math.max(0, revealAt[idx] - alreadyElapsed);
+              const id = setTimeout(()=>{
+                if(isPausedRef.current){ return; }
+                setLitWordIdx(prev=>{
+                  const next=Math.max(prev,idx);
+                  if(!powerPassedRef.current){
+                    const dt=displayTokensRef.current; let wc=0;
+                    for(let k=0;k<dt.length;k++){
+                      if(dt[k]==="(*)"){if(wc<=next)powerPassedRef.current=true;break;}
+                      wc++;
+                    }
+                  }
+                  return next;
+                });
+              }, remaining);
+              wordTimeoutsRef.current.push(id);
+            })(j);
+          }
+        }
+
         boundaryFired = true;
         const ci = e.charIndex;
         const ws = ttsWordStartsRef.current;
         let lo=0, hi=ws.length-1, idx=0;
         while(lo<=hi){const mid=(lo+hi)>>1; if(ws[mid]<=ci){idx=mid;lo=mid+1;}else hi=mid-1;}
-        // Always prefer the boundary index when it's ahead of the scheduler
         setLitWordIdx(prev => Math.max(prev, idx));
         if(!powerPassedRef.current && ci>=powerCharIdxRef.current) powerPassedRef.current=true;
       });
+
+      // ── Method 2: fallback scheduler for Safari/Firefox/iOS ────────────────
+      // Schedules all words using estimated latency. If boundary events fire
+      // (Chrome/Edge), they cancel and replace these with corrected timers above.
+      // Uses IIFE to capture idx in closure for each word.
+      const scheduleAllWords = (offsetMs: number) => {
+        for(let i=0;i<ttsWords.length;i++){
+          ((idx:number)=>{
+            const delay = offsetMs + revealAt[idx];
+            const id = setTimeout(()=>{
+              if(isPausedRef.current){
+                const remaining:number[]=[]; let gap=0;
+                for(let j=idx;j<ttsWords.length;j++){
+                  remaining.push(gap); gap+=msPerWord(ttsWords[j]?.length??4);
+                }
+                wordOffsetsRef.current=remaining; return;
+              }
+              setLitWordIdx(prev=>{
+                const next=Math.max(prev,idx);
+                if(!powerPassedRef.current){
+                  const dt=displayTokensRef.current; let wc=0;
+                  for(let k=0;k<dt.length;k++){
+                    if(dt[k]==="(*)"){if(wc<=next)powerPassedRef.current=true;break;}
+                    wc++;
+                  }
+                }
+                return next;
+              });
+            }, delay);
+            wordTimeoutsRef.current.push(id);
+          })(i);
+        }
+      };
+
+      void boundaryFired; // suppress unused-var lint warning
 
       u.onend=()=>{
         wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
@@ -488,7 +528,12 @@ export default function NAQTQuizBowl(){
         startTimer(15);
       };
 
+      // Record exact moment speak() is called, then start fallback scheduler.
+      // On Chrome/Edge, boundary events will fire and replace the fallback timers
+      // with accurately-calibrated ones. On Safari/Firefox, the fallback runs.
       window.speechSynthesis.speak(u);
+      speakCalledAt = performance.now();
+      scheduleAllWords(startupLatencyMs);
     };
 
     window.speechSynthesis.getVoices().length===0
