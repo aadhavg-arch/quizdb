@@ -555,6 +555,9 @@ export default function NAQTQuizBowl(){
     // CHANGED: cancel scheduled word-reveal timeouts on new question
     wordTimeoutsRef.current.forEach(id=>clearTimeout(id)); wordTimeoutsRef.current=[];
     recognRef.current?.abort();
+
+    try{
+      const res=await fetch("/api/question",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           category, subArea: subArea==="All Sub-Areas"?"":subArea,
