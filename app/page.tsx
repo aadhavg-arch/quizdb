@@ -125,7 +125,8 @@ export default function NAQTQuizBowl(){
   const [voiceAns, setVoiceAns] = useState("");
   const [result,   setResult]   = useState<JudgeResult|null>(null);
   const [isPower,  setIsPower]  = useState(false);
-  const [mode,     setMode]     = useState<"text"|"voice">("text");
+  // CHANGED: default mode is "voice" instead of "text"
+  const [mode,     setMode]     = useState<"text"|"voice">("voice");
   const [isPaused, setIsPaused] = useState(false);
 
   // ── Score ──
@@ -158,6 +159,8 @@ export default function NAQTQuizBowl(){
     recognRef.current?.abort();
     if(timerItvRef.current) clearInterval(timerItvRef.current);
     if(wordSyncItvRef.current) clearInterval(wordSyncItvRef.current);
+    // CHANGED: clear scheduled word-reveal timeouts on unmount
+    wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
   },[]);
 
   // ── addLog (no-op — log panel removed, kept as stable no-op for dep arrays) ──
@@ -276,13 +279,29 @@ export default function NAQTQuizBowl(){
       addLog("judge","Voice not supported here. Please type."); setMode("text"); inputRef.current?.focus(); return;
     }
     const r:InstanceType<SRCtor>=new SR();
-    r.lang="en-US"; r.interimResults=false; r.maxAlternatives=3;
+    r.lang="en-US"; r.interimResults=false;
+    // CHANGED: collect up to 5 alternatives so near-pronunciations are captured
+    r.maxAlternatives=5;
     recognRef.current=r; setPhase("listening");
     addLog("reader","🎤 Listening…");
     r.onresult=(e:SREv)=>{
-      const heard=e.results[0][0].transcript;
-      setVoiceAns(heard); addLog("student",`"${heard}"`);
-      setPhase("buzzed"); submitAnswerRef.current(heard);
+      // CHANGED: collect all recognition alternatives (not just the top one)
+      // and join them as a comma-separated string so the judge can phonetically
+      // compare each one against the correct answer.
+      const alternatives: string[] = [];
+      const result0 = e.results[0];
+      for(let i=0;i<result0.length;i++){
+        const t = result0[i].transcript.trim();
+        if(t && !alternatives.includes(t)) alternatives.push(t);
+      }
+      // Primary transcript shown to student is still the top result
+      const primary = alternatives[0] ?? "";
+      setVoiceAns(primary);
+      addLog("student",`"${primary}"`);
+      setPhase("buzzed");
+      // CHANGED: pass all alternatives so judge can accept near-pronunciations
+      const allAlternatives = alternatives.join("|");
+      submitAnswerRef.current(allAlternatives);
     };
     r.onerror=()=>{ addLog("judge","Couldn't hear — please type."); setPhase("buzzed"); setMode("text"); inputRef.current?.focus(); };
     r.start();
@@ -293,6 +312,9 @@ export default function NAQTQuizBowl(){
     if(phaseRef.current!=="reading") return;
     window.speechSynthesis?.cancel();
     if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+    // CHANGED: also cancel scheduled word-reveal timeouts
+    wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
+    wordTimeoutsRef.current=[];
     clearTimer();
     const power=!powerPassedRef.current;
     setIsPower(power); isPowerRef.current=power;
@@ -333,88 +355,122 @@ export default function NAQTQuizBowl(){
   },[]);
 
   // ── readQuestion (TTS + robust word-by-word sync) ──
-  // Strategy: use boundary events when available (Chrome desktop).
-  // Simultaneously run a setInterval fallback that advances words based on
-  // estimated timing — this covers Safari, Firefox, iOS where boundary
-  // either doesn't fire or only fires per-sentence.
+  //
+  // Synchronisation strategy (three layers, most-to-least accurate):
+  //
+  //  1. boundary events  — Chrome/Edge desktop only; gives exact charIndex per word.
+  //     When these fire we use them directly and they suppress the fallback.
+  //
+  //  2. Word-length weighted scheduler (NEW) — pre-computes an expected reveal
+  //     time for every word based on its character length.  Longer words take
+  //     more time to pronounce, so each word gets proportional time rather than
+  //     a flat 420 ms.  Calibrated to rate=0.85 English TTS:
+  //       • base time per word  ≈ 200 ms
+  //       • +45 ms per character (covers syllable duration at this rate)
+  //       • total clamped to [180, 900] ms so very short/long words stay sane
+  //     The scheduler uses setTimeout chains so each word fires exactly when
+  //     needed — no drift from setInterval's fixed tick.
+  //
+  //  3. boundary-event override — if boundary events DO fire after the
+  //     scheduler has already advanced, we accept whichever index is higher.
+  //
   const wordSyncItvRef = useRef<ReturnType<typeof setInterval>|null>(null);
+  // Store all scheduled timeout IDs so we can cancel them cleanly
+  const wordTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const readQuestion=useCallback((qText:string)=>{
     const tts=qText.replace(/\(\*\)/g,"...");
     window.speechSynthesis.cancel();
+
+    // Cancel any pending word-reveal timers from a previous question
     if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+    wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
+    wordTimeoutsRef.current=[];
 
     const go=()=>{
       const u=new SpeechSynthesisUtterance(tts);
       const v=getUSVoice(); if(v) u.voice=v;
+      // CHANGED: keep rate at 0.85 — DO NOT change; the scheduler is calibrated to this
       u.lang="en-US"; u.rate=0.85; u.pitch=1; u.volume=1;
 
-      // ── Track whether boundary events are actually firing ──
-      let boundaryFired = false;
-      let lastBoundaryIdx = -1;
+      const TTS_RATE = 0.85;
 
-      // ── Method 1: boundary events (Chrome/Edge desktop) ──
+      // ── Pre-compute per-word reveal offsets (ms from TTS start) ──────────
+      // Split the TTS string into words to measure each word's character length.
+      const ttsWords = tts.match(/\S+/g) ?? [];
+      // CHANGED: word-length-weighted timing instead of flat 420ms
+      // base = 200ms + 45ms per character, clamped to [180, 900] ms per word
+      const msPerWord = (chars:number) =>
+        Math.min(900, Math.max(180, Math.round((200 + chars * 45) / TTS_RATE)));
+
+      // Build cumulative reveal times for each word index
+      const revealAt: number[] = [];
+      let elapsed = 250; // small lead-in before first word appears
+      for(let i=0;i<ttsWords.length;i++){
+        revealAt.push(elapsed);
+        elapsed += msPerWord(ttsWords[i].length);
+      }
+
+      // ── Schedule word reveals using setTimeout chains ─────────────────────
+      // Each timeout fires independently — no drift accumulation.
+      let boundaryFired = false;
+
+      const scheduleWord = (idx:number)=>{
+        if(idx >= ttsWords.length) return;
+        const id = setTimeout(()=>{
+          // CHANGED: if boundary events are ahead, do not go backwards
+          setLitWordIdx(prev => {
+            const next = Math.max(prev, idx);
+            // Update power-passed marker
+            if(!powerPassedRef.current){
+              const dt = displayTokensRef.current;
+              let wc=0;
+              for(let i=0;i<dt.length;i++){
+                if(dt[i]==="(*)"){
+                  if(wc <= next) powerPassedRef.current=true;
+                  break;
+                }
+                wc++;
+              }
+            }
+            return next;
+          });
+        }, revealAt[idx]);
+        wordTimeoutsRef.current.push(id);
+      };
+
+      // Schedule all words up front
+      for(let i=0;i<ttsWords.length;i++) scheduleWord(i);
+
+      // ── Method 1: boundary events (Chrome/Edge) ──────────────────────────
+      // When boundary events fire they take over — they're more accurate than
+      // the scheduler.  We still let the scheduler run because cancelling it
+      // mid-flight is unreliable across browsers.
       u.addEventListener("boundary",(e:SpeechSynthesisEvent)=>{
-        if(e.name !== "word") return;           // ignore sentence boundaries
+        if(e.name !== "word") return;
         boundaryFired = true;
         const ci = e.charIndex;
         const ws = ttsWordStartsRef.current;
         let lo=0, hi=ws.length-1, idx=0;
         while(lo<=hi){const mid=(lo+hi)>>1; if(ws[mid]<=ci){idx=mid;lo=mid+1;}else hi=mid-1;}
-        lastBoundaryIdx = idx;
-        setLitWordIdx(idx);
+        // Always prefer the boundary index when it's ahead of the scheduler
+        setLitWordIdx(prev => Math.max(prev, idx));
         if(!powerPassedRef.current && ci>=powerCharIdxRef.current) powerPassedRef.current=true;
       });
 
-      // ── Method 2: interval fallback (Safari / Firefox / iOS / mobile) ──
-      // Estimate: average English TTS at rate=0.85 ≈ 2.8 words/sec → ~357ms/word
-      // We start it after a short delay and only use it when boundary hasn't fired.
-      const MS_PER_WORD = Math.round(1000 / (2.8 * 0.85)); // ~420ms
-      let fallbackIdx = 0;
-      const tokens = ttsWordStartsRef.current; // word count proxy
-
-      setTimeout(()=>{
-        wordSyncItvRef.current = setInterval(()=>{
-          // If boundary events are working, let them drive — don't double-advance
-          if(boundaryFired && lastBoundaryIdx > fallbackIdx){
-            fallbackIdx = lastBoundaryIdx;
-            return;
-          }
-          // Interval fallback: advance one word at a time
-          const totalWords = tokens.length;
-          if(fallbackIdx < totalWords - 1){
-            fallbackIdx++;
-            // Only update state if boundary isn't already ahead
-            setLitWordIdx(prev => {
-              const next = Math.max(prev, fallbackIdx);
-              // Power-passed: count non-(*) words before (*) in displayTokens
-              if(!powerPassedRef.current){
-                const dt = displayTokensRef.current;
-                let wc = 0;
-                for(let i=0;i<dt.length;i++){
-                  if(dt[i]==="(*)"){
-                    if(wc <= next) powerPassedRef.current=true;
-                    break;
-                  }
-                  wc++;
-                }
-              }
-              return next;
-            });
-          } else {
-            if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
-          }
-        }, MS_PER_WORD);
-      }, 300); // small delay so first word appears quickly after TTS starts
-
       u.onend=()=>{
+        wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
+        wordTimeoutsRef.current=[];
         if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
         setLitWordIdx(Infinity);
         addLog("reader","Reading done — 15 seconds to buzz and answer!");
         startTimer(15);
+        void boundaryFired; // suppress unused-var warning
       };
 
       u.onerror=()=>{
+        wordTimeoutsRef.current.forEach(id=>clearTimeout(id));
+        wordTimeoutsRef.current=[];
         if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
         setLitWordIdx(Infinity);
         startTimer(15);
@@ -437,10 +493,9 @@ export default function NAQTQuizBowl(){
     powerPassedRef.current=false; powerCharIdxRef.current=Infinity;
     window.speechSynthesis?.cancel();
     if(wordSyncItvRef.current){ clearInterval(wordSyncItvRef.current); wordSyncItvRef.current=null; }
+    // CHANGED: cancel scheduled word-reveal timeouts on new question
+    wordTimeoutsRef.current.forEach(id=>clearTimeout(id)); wordTimeoutsRef.current=[];
     recognRef.current?.abort();
-
-    try{
-      const res=await fetch("/api/question",{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           category, subArea: subArea==="All Sub-Areas"?"":subArea,
@@ -972,7 +1027,8 @@ export default function NAQTQuizBowl(){
                       </div>
                       {(voiceAns||textAns)&&(
                         <div style={{fontSize:"0.78rem",color:C.textSoft,marginTop:3,fontFamily:"system-ui,sans-serif"}}>
-                          You said: <em>&quot;{voiceAns||textAns}&quot;</em>
+                          {/* CHANGED: voiceAns may contain pipe-joined alternatives; show only the primary */}
+                          You said: <em>&quot;{(voiceAns||textAns).split("|")[0]}&quot;</em>
                         </div>
                       )}
                     </div>
